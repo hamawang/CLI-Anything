@@ -278,6 +278,20 @@ class TestRegistry:
         assert result["clis"][0]["name"] == "gimp"
         mock_get.assert_called_once()
 
+    @patch("cli_hub.registry.fetch_public_registry", return_value=None)
+    @patch("cli_hub.registry.fetch_registry")
+    def test_fetch_all_clis_does_not_mutate_registry_entries(self, mock_fetch_registry, mock_fetch_public):
+        registry = {
+            "meta": SAMPLE_REGISTRY["meta"],
+            "clis": [dict(SAMPLE_REGISTRY["clis"][0])],
+        }
+        mock_fetch_registry.return_value = registry
+
+        result = fetch_all_clis()
+
+        assert result[0]["_source"] == "harness"
+        assert "_source" not in registry["clis"][0]
+
     @patch("cli_hub.registry.fetch_all_clis", return_value=SAMPLE_REGISTRY["clis"])
     def test_get_cli_found(self, mock_fetch):
         cli = get_cli("gimp")
