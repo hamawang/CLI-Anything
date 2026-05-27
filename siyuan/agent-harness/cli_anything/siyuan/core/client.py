@@ -289,7 +289,7 @@ class SiYuanClient:
     # ── Tag API ────────────────────────────────────────────────────────
 
     def get_tags(self) -> list[dict[str, Any]]:
-        return self._post("/api/tag/getTag", {})
+        return self._post("/api/tag/getTag", {"ignoreMaxListHint": True})
 
     # ── System API ─────────────────────────────────────────────────────
 
