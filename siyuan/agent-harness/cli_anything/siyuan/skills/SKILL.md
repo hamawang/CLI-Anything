@@ -73,8 +73,8 @@ documents, blocks, search, and export.
 # List notebooks (JSON)
 cli-anything-siyuan --json notebook list
 
-# Create a document with Markdown
-cli-anything-siyuan doc create nb1 /projects/new "## Title\n\nContent"
+# Create a document with Markdown (use --md flag)
+cli-anything-siyuan doc create nb1 /projects/new --md "## Title\n\nContent"
 
 # SQL search
 cli-anything-siyuan sql "SELECT id, content FROM blocks WHERE content LIKE '%meeting%' LIMIT 5"
