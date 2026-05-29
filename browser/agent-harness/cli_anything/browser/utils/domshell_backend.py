@@ -19,6 +19,7 @@ that single tool.
 
 import asyncio
 import os
+import re
 import shlex
 import subprocess
 import shutil
@@ -140,6 +141,47 @@ def _q(arg: str) -> str:
     return shlex.quote(arg)
 
 
+# DOMShell 2.x appends a "[lane: <id>]" marker as the last line of every
+# domshell_execute reply. We parse it out and store it on the harness
+# Session so subsequent calls can pass group_id=<id> and stay pinned to
+# the same Chrome tab-group (i.e. same browser state).
+_LANE_LINE = re.compile(r"\[lane:\s*([^\]\s]+)\s*\]\s*$")
+
+
+def _extract_lane_id(result: Any) -> Optional[str]:
+    """Parse the trailing ``[lane: <id>]`` marker DOMShell appends to replies.
+
+    Returns the lane id, or ``None`` if no marker is present, the text is
+    empty, or the marker reports the default "shared" lane (which is
+    DOMShell's no-isolation sentinel and not something we want to pin to).
+    """
+    text = ""
+    content = getattr(result, "content", None)
+    if content:
+        for c in content:
+            piece = getattr(c, "text", None)
+            if piece:
+                text += piece
+    if not text:
+        return None
+    m = _LANE_LINE.search(text.strip())
+    if not m:
+        return None
+    lane = m.group(1).strip()
+    if not lane or lane == "shared":
+        return None
+    return lane
+
+
+def _capture_lane(session: Any, result: Any) -> None:
+    """Update ``session.domshell_lane_id`` from a ``_call_execute`` result."""
+    if session is None:
+        return
+    lane = _extract_lane_id(result)
+    if lane:
+        session.domshell_lane_id = lane
+
+
 def _assert_single_line(field: str, value: str) -> None:
     """Reject newline characters in a user-supplied string.
 
@@ -156,13 +198,22 @@ def _assert_single_line(field: str, value: str) -> None:
         )
 
 
-async def _call_execute(command: str, use_daemon: bool = False) -> Any:
+async def _call_execute(
+    command: str,
+    use_daemon: bool = False,
+    *,
+    session: Any = None,
+) -> Any:
     """Run a DOMShell command via the single `domshell_execute` MCP tool.
 
     Args:
         command: DOMShell command string. May contain newlines for multi-command
             execution — each line runs in order in the same shell state.
         use_daemon: If True, use persistent daemon connection (if available)
+        session: Harness ``Session`` whose ``domshell_lane_id`` should be
+            forwarded as ``group_id`` (when set) and updated from the result
+            (when DOMShell returns a ``[lane: <id>]`` marker). Pass ``None``
+            for one-off direct calls that don't need cross-call state.
 
     Returns:
         Tool result as returned by MCP server
@@ -172,12 +223,24 @@ async def _call_execute(command: str, use_daemon: bool = False) -> Any:
     """
     global _daemon_session, _daemon_read, _daemon_write
 
+    arguments: dict[str, Any] = {"command": command}
+    # Reuse the previously-captured DOMShell lane so this call lands in the
+    # same Chrome tab-group as the prior commands in this session. Without
+    # this, every fresh stdio ClientSession would be assigned a brand-new
+    # lane and `page open` / `fs ls` etc. would run in disjoint browser
+    # state. The very first call leaves group_id unset so DOMShell
+    # auto-assigns; _capture_lane stores that id on the session for the
+    # next call.
+    if session is not None and getattr(session, "domshell_lane_id", None):
+        arguments["group_id"] = session.domshell_lane_id
+
     if use_daemon and _daemon_session is not None:
         # Use persistent daemon connection
         try:
             result = await _daemon_session.call_tool(
-                "domshell_execute", {"command": command}
+                "domshell_execute", arguments
             )
+            _capture_lane(session, result)
             return result
         except Exception:
             # Daemon died, fall back to spawning new server
@@ -191,11 +254,12 @@ async def _call_execute(command: str, use_daemon: bool = False) -> Any:
 
     try:
         async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(
-                    "domshell_execute", {"command": command}
+            async with ClientSession(read, write) as mcp_session:
+                await mcp_session.initialize()
+                result = await mcp_session.call_tool(
+                    "domshell_execute", arguments
                 )
+                _capture_lane(session, result)
                 return result
     except Exception as e:
         raise RuntimeError(
@@ -275,12 +339,13 @@ def daemon_started() -> bool:
 # `domshell_execute`. The public Python API is unchanged from the
 # pre-2.0.0 per-tool wrappers.
 
-def ls(path: str = "/", use_daemon: bool = False) -> dict:
+def ls(path: str = "/", *, use_daemon: bool = False, session: Any = None) -> dict:
     """List directory contents in the accessibility tree.
 
     Args:
         path: Path in accessibility tree (e.g., "/", "/main", "/main/div[0]")
         use_daemon: Use persistent daemon connection if available
+        session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
         Dict with 'entries' key containing list of accessible elements
@@ -290,15 +355,16 @@ def ls(path: str = "/", use_daemon: bool = False) -> dict:
         {"path": "/", "entries": [{"name": "main", "role": "landmark", ...}]}
     """
     command = f"ls {_q(path)}" if path else "ls"
-    return asyncio.run(_call_execute(command, use_daemon))
+    return asyncio.run(_call_execute(command, use_daemon, session=session))
 
 
-def cd(path: str, use_daemon: bool = False) -> dict:
+def cd(path: str, *, use_daemon: bool = False, session: Any = None) -> dict:
     """Change directory in the accessibility tree.
 
     Args:
         path: Target path
         use_daemon: Use persistent daemon connection if available
+        session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
         Dict with 'path' key confirming current location
@@ -307,15 +373,16 @@ def cd(path: str, use_daemon: bool = False) -> dict:
         >>> cd("/main/div[0]")
         {"path": "/main/div[0]", "element": {...}}
     """
-    return asyncio.run(_call_execute(f"cd {_q(path)}", use_daemon))
+    return asyncio.run(_call_execute(f"cd {_q(path)}", use_daemon, session=session))
 
 
-def cat(path: str, use_daemon: bool = False) -> dict:
+def cat(path: str, *, use_daemon: bool = False, session: Any = None) -> dict:
     """Read element content from the accessibility tree.
 
     Args:
         path: Path to element
         use_daemon: Use persistent daemon connection if available
+        session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
         Dict with element details including text, role, attributes
@@ -324,7 +391,7 @@ def cat(path: str, use_daemon: bool = False) -> dict:
         >>> cat("/main/button[0]")
         {"name": "Submit", "role": "button", "text": "Submit", ...}
     """
-    return asyncio.run(_call_execute(f"cat {_q(path)}", use_daemon))
+    return asyncio.run(_call_execute(f"cat {_q(path)}", use_daemon, session=session))
 
 
 def grep(
@@ -333,6 +400,7 @@ def grep(
     path: str = "",
     prev: str = "/",
     use_daemon: bool = False,
+    session: Any = None,
 ) -> dict:
     """Search for pattern in the accessibility tree.
 
@@ -373,16 +441,19 @@ def grep(
         _assert_single_line("path", path)
         _assert_single_line("prev", prev)
         command = f"cd {_q(path)}\ngrep {_q(pattern)}\ncd {_q(prev)}"
-        return asyncio.run(_call_execute(command, use_daemon))
-    return asyncio.run(_call_execute(f"grep {_q(pattern)}", use_daemon))
+        return asyncio.run(_call_execute(command, use_daemon, session=session))
+    return asyncio.run(
+        _call_execute(f"grep {_q(pattern)}", use_daemon, session=session)
+    )
 
 
-def click(path: str, use_daemon: bool = False) -> dict:
+def click(path: str, *, use_daemon: bool = False, session: Any = None) -> dict:
     """Click an element in the accessibility tree.
 
     Args:
         path: Path to element to click
         use_daemon: Use persistent daemon connection if available
+        session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
         Dict with action result
@@ -391,15 +462,18 @@ def click(path: str, use_daemon: bool = False) -> dict:
         >>> click("/main/button[0]")
         {"action": "click", "path": "/main/button[0]", "status": "success"}
     """
-    return asyncio.run(_call_execute(f"click {_q(path)}", use_daemon))
+    return asyncio.run(
+        _call_execute(f"click {_q(path)}", use_daemon, session=session)
+    )
 
 
-def open_url(url: str, use_daemon: bool = False) -> dict:
+def open_url(url: str, *, use_daemon: bool = False, session: Any = None) -> dict:
     """Navigate to a URL in Chrome.
 
     Args:
         url: URL to navigate to
         use_daemon: Use persistent daemon connection if available
+        session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
         Dict with navigation result
@@ -408,46 +482,57 @@ def open_url(url: str, use_daemon: bool = False) -> dict:
         >>> open_url("https://example.com")
         {"url": "https://example.com", "status": "loaded"}
     """
-    return asyncio.run(_call_execute(f"open {_q(url)}", use_daemon))
+    return asyncio.run(
+        _call_execute(f"open {_q(url)}", use_daemon, session=session)
+    )
 
 
-def reload(use_daemon: bool = False) -> dict:
+def reload(*, use_daemon: bool = False, session: Any = None) -> dict:
     """Reload the current page.
 
     Args:
         use_daemon: Use persistent daemon connection if available
+        session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
         Dict with reload result
     """
-    return asyncio.run(_call_execute("refresh", use_daemon))
+    return asyncio.run(_call_execute("refresh", use_daemon, session=session))
 
 
-def back(use_daemon: bool = False) -> dict:
+def back(*, use_daemon: bool = False, session: Any = None) -> dict:
     """Navigate back in history.
 
     Args:
         use_daemon: Use persistent daemon connection if available
+        session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
         Dict with navigation result
     """
-    return asyncio.run(_call_execute("back", use_daemon))
+    return asyncio.run(_call_execute("back", use_daemon, session=session))
 
 
-def forward(use_daemon: bool = False) -> dict:
+def forward(*, use_daemon: bool = False, session: Any = None) -> dict:
     """Navigate forward in history.
 
     Args:
         use_daemon: Use persistent daemon connection if available
+        session: Harness session whose DOMShell lane id is reused / updated
 
     Returns:
         Dict with navigation result
     """
-    return asyncio.run(_call_execute("forward", use_daemon))
+    return asyncio.run(_call_execute("forward", use_daemon, session=session))
 
 
-def type_text(path: str, text: str, use_daemon: bool = False) -> dict:
+def type_text(
+    path: str,
+    text: str,
+    *,
+    use_daemon: bool = False,
+    session: Any = None,
+) -> dict:
     """Type text into an input element.
 
     Focuses the element and types in a single ``domshell_execute`` call so
@@ -471,7 +556,7 @@ def type_text(path: str, text: str, use_daemon: bool = False) -> dict:
     _assert_single_line("path", path)
     _assert_single_line("text", text)
     command = f"focus {_q(path)}\ntype {_q(text)}"
-    return asyncio.run(_call_execute(command, use_daemon))
+    return asyncio.run(_call_execute(command, use_daemon, session=session))
 
 
 # ── Daemon control functions ───────────────────────────────────────────

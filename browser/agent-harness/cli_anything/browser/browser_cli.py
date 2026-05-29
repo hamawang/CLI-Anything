@@ -304,7 +304,7 @@ def act_click(path):
     """Click an element at the given path."""
     sess = get_session()
     use_daemon = sess.daemon_mode
-    result = backend.click(path, use_daemon=use_daemon)
+    result = backend.click(path, use_daemon=use_daemon, session=sess)
     output(result, f"Clicked: {path}")
 
 
@@ -316,7 +316,7 @@ def act_type(path, text):
     """Type text into an input element."""
     sess = get_session()
     use_daemon = sess.daemon_mode
-    result = backend.type_text(path, text, use_daemon=use_daemon)
+    result = backend.type_text(path, text, use_daemon=use_daemon, session=sess)
     output(result, f"Typed into: {path}")
 
 

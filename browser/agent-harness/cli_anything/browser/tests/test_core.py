@@ -216,7 +216,7 @@ class TestFsModule:
 
             result = fs.list_elements(sess)
 
-            mock_ls.assert_called_once_with("/main", use_daemon=False)
+            mock_ls.assert_called_once_with("/main", use_daemon=False, session=sess)
 
     def test_list_elements_with_path(self):
         """Listing elements with explicit path overrides working_dir."""
@@ -228,7 +228,7 @@ class TestFsModule:
 
             result = fs.list_elements(sess, "/div")
 
-            mock_ls.assert_called_once_with("/div", use_daemon=False)
+            mock_ls.assert_called_once_with("/div", use_daemon=False, session=sess)
 
     def test_list_elements_empty_path_uses_working_dir(self):
         """Listing with empty path uses session working_dir."""
@@ -240,7 +240,7 @@ class TestFsModule:
 
             result = fs.list_elements(sess, "")
 
-            mock_ls.assert_called_once_with("/main", use_daemon=False)
+            mock_ls.assert_called_once_with("/main", use_daemon=False, session=sess)
 
     def test_change_directory_absolute_path(self):
         """Changing to absolute path updates working_dir."""
@@ -252,7 +252,7 @@ class TestFsModule:
             result = fs.change_directory(sess, "/main")
 
             assert sess.working_dir == "/main"
-            mock_cd.assert_called_once_with("/main", use_daemon=False)
+            mock_cd.assert_called_once_with("/main", use_daemon=False, session=sess)
 
     def test_change_directory_relative_parent(self):
         """Changing to .. goes up one level."""
@@ -265,7 +265,7 @@ class TestFsModule:
             result = fs.change_directory(sess, "..")
 
             assert sess.working_dir == "/main"
-            mock_cd.assert_called_once_with("/main", use_daemon=False)
+            mock_cd.assert_called_once_with("/main", use_daemon=False, session=sess)
 
     def test_change_directory_parent_from_root(self):
         """Changing to .. from root stays at root."""
@@ -300,7 +300,7 @@ class TestFsModule:
             result = fs.change_directory(sess, "div[0]")
 
             assert sess.working_dir == "/main/div[0]"
-            mock_cd.assert_called_once_with("/main/div[0]", use_daemon=False)
+            mock_cd.assert_called_once_with("/main/div[0]", use_daemon=False, session=sess)
 
     def test_read_element(self):
         """Reading element calls backend."""
@@ -315,7 +315,7 @@ class TestFsModule:
 
             result = fs.read_element(sess, "/main/button[0]")
 
-            mock_cat.assert_called_once_with("/main/button[0]", use_daemon=False)
+            mock_cat.assert_called_once_with("/main/button[0]", use_daemon=False, session=sess)
 
     def test_read_element_empty_path_uses_working_dir(self):
         """Reading with empty path uses session working_dir."""
@@ -327,7 +327,7 @@ class TestFsModule:
 
             result = fs.read_element(sess, "")
 
-            mock_cat.assert_called_once_with("/main", use_daemon=False)
+            mock_cat.assert_called_once_with("/main", use_daemon=False, session=sess)
 
     def test_grep_elements(self):
         """Grepping calls backend with pattern and session cwd as path."""
@@ -341,7 +341,7 @@ class TestFsModule:
             result = fs.grep_elements(sess, "Login")
 
             mock_grep.assert_called_once_with(
-                "Login", path="/", prev="/", use_daemon=False
+                "Login", path="/", prev="/", use_daemon=False, session=sess
             )
 
     def test_grep_elements_with_path(self):
@@ -354,7 +354,7 @@ class TestFsModule:
             result = fs.grep_elements(sess, "Login", "/main")
 
             mock_grep.assert_called_once_with(
-                "Login", path="/main", prev="/", use_daemon=False
+                "Login", path="/main", prev="/", use_daemon=False, session=sess
             )
 
 
@@ -373,7 +373,7 @@ class TestDaemonMode:
 
             result = fs.list_elements(sess)
 
-            mock_ls.assert_called_once_with("/", use_daemon=True)
+            mock_ls.assert_called_once_with("/", use_daemon=True, session=sess)
 
     def test_normal_mode_does_not_use_daemon(self):
         """Commands don't use daemon mode when session.daemon_mode is False."""
@@ -385,4 +385,4 @@ class TestDaemonMode:
 
             result = fs.list_elements(sess)
 
-            mock_ls.assert_called_once_with("/", use_daemon=False)
+            mock_ls.assert_called_once_with("/", use_daemon=False, session=sess)

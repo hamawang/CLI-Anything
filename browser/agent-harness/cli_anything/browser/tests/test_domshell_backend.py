@@ -22,7 +22,8 @@ def test_grep_unrooted_produces_single_grep_call(mock_call):
 
     backend.grep("Login")
 
-    assert mock_call.call_args_list == [call("grep Login", False)]
+    # session=None when no session is passed (default).
+    assert mock_call.call_args_list == [call("grep Login", False, session=None)]
 
 
 @patch.object(backend, "_call_execute", new_callable=AsyncMock)
@@ -40,7 +41,7 @@ def test_grep_rooted_emits_single_multiline_call(mock_call):
     backend.grep("Login", path="/main", prev="/")
 
     assert mock_call.call_args_list == [
-        call("cd /main\ngrep Login\ncd /", False),
+        call("cd /main\ngrep Login\ncd /", False, session=None),
     ]
 
 
@@ -108,7 +109,7 @@ def test_grep_keyword_use_daemon_still_works():
     with patch.object(backend, "_call_execute", new_callable=AsyncMock) as mock_call:
         mock_call.return_value = {}
         backend.grep("Login", use_daemon=True)
-        assert mock_call.call_args_list == [call("grep Login", True)]
+        assert mock_call.call_args_list == [call("grep Login", True, session=None)]
 
 
 # ── type_text: focus+type pairing and newline injection guard ─────────
@@ -122,7 +123,7 @@ def test_type_text_emits_focus_then_type_in_one_call(mock_call):
     backend.type_text("search_input", "machine learning")
 
     assert mock_call.call_args_list == [
-        call("focus search_input\ntype 'machine learning'", False),
+        call("focus search_input\ntype 'machine learning'", False, session=None),
     ]
 
 
@@ -218,3 +219,196 @@ def test_cd_rejects_newlines(mock_call):
     mock_call.return_value = {}
     with pytest.raises(ValueError, match="[Nn]ewline"):
         backend.cd("/main\nclick /admin")
+
+
+# ── DOMShell lane persistence across _call_execute calls ─────────────
+#
+# DOMShell 2.x assigns a fresh lane (Chrome tab-group) to every new MCP
+# session. In non-daemon mode each _call_execute opens its own stdio
+# ClientSession, so without explicit group_id every command would land
+# in a brand-new lane and lose browser state from the previous call.
+# The fix: parse the trailing "[lane: <id>]" marker DOMShell appends to
+# each reply, store it on the harness Session, and pass group_id=<id>
+# on every subsequent call.
+
+
+from types import SimpleNamespace
+
+from cli_anything.browser.core.session import Session
+
+
+def _make_result(text: str):
+    """Build a fake CallToolResult whose ``content[0].text`` is ``text``."""
+    return SimpleNamespace(content=[SimpleNamespace(text=text)])
+
+
+# ── _extract_lane_id ────────────────────────────────────────────────
+
+
+def test_extract_lane_id_parses_trailing_marker():
+    assert backend._extract_lane_id(_make_result("✓ ls done\n[lane: 12345]")) == "12345"
+
+
+def test_extract_lane_id_handles_trailing_whitespace():
+    assert backend._extract_lane_id(_make_result("✓ ls done\n[lane: lane-abc]\n")) == "lane-abc"
+
+
+def test_extract_lane_id_ignores_shared_marker():
+    """`[lane: shared]` is DOMShell's no-isolation sentinel — must not pin to it."""
+    assert backend._extract_lane_id(_make_result("✓ ls done\n[lane: shared]")) is None
+
+
+def test_extract_lane_id_returns_none_when_marker_absent():
+    assert backend._extract_lane_id(_make_result("✓ ls done")) is None
+
+
+def test_extract_lane_id_returns_none_for_empty_text():
+    assert backend._extract_lane_id(_make_result("")) is None
+
+
+def test_extract_lane_id_returns_none_when_content_missing():
+    assert backend._extract_lane_id(SimpleNamespace()) is None
+
+
+# ── lane capture + propagation ──────────────────────────────────────
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_first_call_omits_group_id_and_captures_lane(mock_call):
+    """A session with no stored lane: first call has no group_id, captures the returned lane."""
+    sess = Session()  # domshell_lane_id starts as None
+    mock_call.return_value = _make_result("✓\n[lane: 12345]")
+
+    backend.click("submit_btn", session=sess)
+
+    # The session= kwarg the wrapper passes is the Session object itself;
+    # _call_execute is responsible for translating session.domshell_lane_id
+    # into the wire-format group_id. We only assert the call signature here.
+    assert mock_call.call_args == call("click submit_btn", False, session=sess)
+    # _call_execute is mocked, so we exercise _capture_lane directly to
+    # verify the parser hookup that the real _call_execute would do.
+    backend._capture_lane(sess, mock_call.return_value)
+    assert sess.domshell_lane_id == "12345"
+
+
+def test_capture_lane_updates_session():
+    sess = Session()
+    backend._capture_lane(sess, _make_result("✓\n[lane: lane-XYZ]"))
+    assert sess.domshell_lane_id == "lane-XYZ"
+
+
+def test_capture_lane_no_op_when_session_is_none():
+    """Direct backend callers without a session must not crash."""
+    backend._capture_lane(None, _make_result("✓\n[lane: 12345]"))  # no exception
+
+
+def test_capture_lane_no_op_when_marker_missing():
+    sess = Session()
+    sess.domshell_lane_id = "preexisting"
+    backend._capture_lane(sess, _make_result("✓ done"))
+    # No marker → don't clobber the previously-captured lane.
+    assert sess.domshell_lane_id == "preexisting"
+
+
+def test_capture_lane_ignores_shared_marker():
+    sess = Session()
+    sess.domshell_lane_id = "preexisting"
+    backend._capture_lane(sess, _make_result("✓\n[lane: shared]"))
+    assert sess.domshell_lane_id == "preexisting"
+
+
+# ── End-to-end: lane reuse on subsequent calls ───────────────────────
+
+
+def test_call_execute_includes_group_id_when_lane_is_set():
+    """When session.domshell_lane_id is set, _call_execute sends it as group_id.
+
+    We bypass the stdio_client / ClientSession plumbing entirely by patching
+    them — what we want to assert is the arguments dict that gets passed to
+    ``call_tool``.
+    """
+    sess = Session()
+    sess.domshell_lane_id = "lane-7"
+
+    fake_tool = AsyncMock(return_value=_make_result("✓\n[lane: lane-7]"))
+
+    fake_mcp_session = AsyncMock()
+    fake_mcp_session.__aenter__.return_value = fake_mcp_session
+    fake_mcp_session.__aexit__.return_value = None
+    fake_mcp_session.initialize = AsyncMock()
+    fake_mcp_session.call_tool = fake_tool
+
+    fake_stdio = AsyncMock()
+    fake_stdio.__aenter__.return_value = (object(), object())
+    fake_stdio.__aexit__.return_value = None
+
+    with patch.object(backend, "stdio_client", return_value=fake_stdio), \
+         patch.object(backend, "ClientSession", return_value=fake_mcp_session), \
+         patch.object(backend, "_build_server_args", return_value=[]):
+        import asyncio as _aio
+        _aio.run(backend._call_execute("ls /", session=sess))
+
+    name, arguments = fake_tool.call_args.args
+    assert name == "domshell_execute"
+    assert arguments == {"command": "ls /", "group_id": "lane-7"}
+
+
+def test_call_execute_omits_group_id_when_lane_is_none():
+    """First-call shape: no stored lane → no group_id; DOMShell auto-assigns."""
+    sess = Session()  # lane is None
+    fake_tool = AsyncMock(return_value=_make_result("✓\n[lane: brand-new]"))
+
+    fake_mcp_session = AsyncMock()
+    fake_mcp_session.__aenter__.return_value = fake_mcp_session
+    fake_mcp_session.__aexit__.return_value = None
+    fake_mcp_session.initialize = AsyncMock()
+    fake_mcp_session.call_tool = fake_tool
+
+    fake_stdio = AsyncMock()
+    fake_stdio.__aenter__.return_value = (object(), object())
+    fake_stdio.__aexit__.return_value = None
+
+    with patch.object(backend, "stdio_client", return_value=fake_stdio), \
+         patch.object(backend, "ClientSession", return_value=fake_mcp_session), \
+         patch.object(backend, "_build_server_args", return_value=[]):
+        import asyncio as _aio
+        _aio.run(backend._call_execute("ls /", session=sess))
+
+    arguments = fake_tool.call_args.args[1]
+    assert "group_id" not in arguments
+    # The auto-assigned lane gets captured for next time.
+    assert sess.domshell_lane_id == "brand-new"
+
+
+def test_distinct_sessions_have_isolated_lanes():
+    """Two sessions track lanes independently — no cross-contamination."""
+    s1 = Session()
+    s2 = Session()
+    backend._capture_lane(s1, _make_result("✓\n[lane: lane-A]"))
+    backend._capture_lane(s2, _make_result("✓\n[lane: lane-B]"))
+    assert s1.domshell_lane_id == "lane-A"
+    assert s2.domshell_lane_id == "lane-B"
+
+
+# ── Keyword-only enforcement on session= ─────────────────────────────
+
+
+def test_session_is_keyword_only_on_click():
+    """Discipline matches grep's earlier keyword-only fix."""
+    with pytest.raises(TypeError):
+        backend.click("submit_btn", False, None)  # type: ignore[misc]
+
+
+def test_session_is_keyword_only_on_ls():
+    with pytest.raises(TypeError):
+        backend.ls("/", False, None)  # type: ignore[misc]
+
+
+def test_session_is_keyword_only_on_type_text():
+    with pytest.raises(TypeError):
+        backend.type_text("input", "hello", False, None)  # type: ignore[misc]
+
+
+def test_session_is_keyword_only_on_open_url():
+    with pytest.raises(TypeError):
+        backend.open_url("https://example.com", False, None)  # type: ignore[misc]
