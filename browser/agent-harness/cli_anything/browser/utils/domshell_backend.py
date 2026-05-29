@@ -18,6 +18,7 @@ that single tool.
 """
 
 import asyncio
+import logging
 import os
 import re
 import shlex
@@ -26,6 +27,9 @@ import shutil
 from typing import Any, Optional
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+
+log = logging.getLogger(__name__)
 
 # DOMShell MCP server command
 # The harness connects to a running DOMShell server via domshell-proxy (stdio bridge).
@@ -85,7 +89,7 @@ def is_available() -> tuple[bool, str]:
 
     Examples:
         >>> is_available()
-        (True, "DOMShell v2.0.0 is available")
+        (True, "DOMShell vX.Y.Z is available")   # whatever npx resolves to
         >>> is_available()
         (False, "npx not found. Install Node.js from https://nodejs.org/")
     """
@@ -149,6 +153,12 @@ def _q(arg: str) -> str:
 # domshell_execute reply. We parse it out and store it on the harness
 # Session so subsequent calls can pass group_id=<id> and stay pinned to
 # the same Chrome tab-group (i.e. same browser state).
+#
+# The marker format is part of the DOMShell 2.x wire contract — see the
+# upstream docs (https://github.com/apireno/DOMShell, search the README
+# for "Multi-line semantics" / "lane marker"). If DOMShell ever changes
+# the marker format (e.g. to JSON, or to [group: …]), this regex needs
+# to follow.
 _LANE_LINE = re.compile(r"\[lane:\s*([^\]\s]+)\s*\]\s*$")
 
 
@@ -391,8 +401,13 @@ async def _call_execute(
             )
             _capture_lane(session, result)
             return result
-        except Exception:
-            # Daemon died, fall back to spawning new server
+        except Exception as e:
+            # Daemon died — log diagnosability and fall back to spawning
+            # a fresh server below. Silent swallow was making the daemon
+            # failure mode invisible in user reports.
+            log.warning(
+                "DOMShell daemon call failed, respawning per-command: %s", e,
+            )
             await _stop_daemon()
 
     # Spawn new MCP server process
@@ -747,8 +762,8 @@ def type_text(
 ) -> dict:
     """Type text into an input element.
 
-    Issued as two separate ``domshell_execute`` calls — ``focus``, check
-    for error, then ``type`` only if ``focus`` succeeded. Both share the
+    Issued as separate ``domshell_execute`` calls — ``focus``, check for
+    error, then ``type`` only if ``focus`` succeeded. Both share the
     persisted lane id (via ``session``), so the focus state from the
     first call carries into the second.
 
@@ -759,6 +774,16 @@ def type_text(
     failed ``focus`` followed by a successful ``type`` would dispatch
     keys into whatever was previously focused (potentially a password
     field). Halting between focus and type prevents that.
+
+    Performance note: in non-daemon mode with an absolute path this
+    issues up to four ``_call_execute`` calls (anchor ``cd``, focus,
+    type, restore ``cd``), and each opens a fresh stdio MCP session —
+    so up to four ``npx`` server spawns per call. Relative paths use
+    two calls; daemon mode reuses one persistent connection for the
+    whole chain regardless of path form. The per-call overhead is
+    accepted to keep the wrapper-level error semantics simple; a future
+    refactor could share a single ``ClientSession`` across the chain
+    (post-merge follow-up).
 
     Args:
         path: Path to input element
@@ -779,15 +804,17 @@ def type_text(
     _assert_single_line("path", path)
     _assert_single_line("text", text)
 
-    # A session is required: the focus and type halves split across two
-    # _call_execute calls, and without `session.domshell_lane_id` the
-    # second call would land in a different DOMShell lane and miss the
-    # focus state from the first.
-    if session is None:
+    # In daemon mode both halves share the persistent `_daemon_session`
+    # naturally — same MCP session means same DOMShell lane, no
+    # group_id juggling needed. Only the non-daemon path requires
+    # `session.domshell_lane_id` because each `_call_execute` opens a
+    # fresh stdio session that would land in its own lane otherwise.
+    if session is None and not use_daemon:
         raise ValueError(
-            "type_text: a session argument is required so the focus and type "
-            "calls share a DOMShell lane. Otherwise the focus state from the "
-            "first call would not apply to the second."
+            "type_text: a session argument is required in non-daemon mode "
+            "so the focus and type calls share a DOMShell lane via group_id. "
+            "(Daemon mode shares the persistent connection's lane "
+            "automatically and doesn't need session.)"
         )
 
     translated_path, is_absolute = _translate_path(path)

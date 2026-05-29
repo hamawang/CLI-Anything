@@ -455,10 +455,29 @@ def test_type_text_relative_path_focus_failure_skips_type(mock_call):
     assert result.content[0].text == "Error: focus: No such element"
 
 
-def test_type_text_raises_without_session():
-    """The two halves must share a lane; require a session up front."""
+def test_type_text_raises_without_session_in_non_daemon_mode():
+    """Non-daemon mode: the two halves must share a lane via group_id,
+    which requires a session. Without one, raise.
+    """
     with pytest.raises(ValueError, match="session"):
-        backend.type_text("search_input", "text", session=None)
+        backend.type_text(
+            "search_input", "text", use_daemon=False, session=None,
+        )
+
+
+@patch.object(backend, "_call_execute", new_callable=AsyncMock)
+def test_type_text_allows_no_session_in_daemon_mode(mock_call):
+    """Daemon mode shares lane via the persistent connection — session
+    isn't required. Locks in the contract Copilot flagged.
+    """
+    mock_call.return_value = _make_result("✓\n[lane: 1]")
+
+    # No exception. Relative path → two calls (focus + type).
+    backend.type_text("search_input", "hello", use_daemon=True, session=None)
+
+    assert mock_call.call_count == 2
+    assert mock_call.call_args_list[0].args[0] == "focus search_input"
+    assert mock_call.call_args_list[1].args[0] == "type hello"
 
 
 def test_type_text_raises_with_empty_path():
