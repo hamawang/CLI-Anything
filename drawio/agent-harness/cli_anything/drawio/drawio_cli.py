@@ -521,11 +521,10 @@ def export():
 @click.option("--height", type=int, default=None, help="Output height (PNG)")
 @click.option("--transparent", is_flag=True, help="Transparent background (PNG)")
 @click.option("--crop", is_flag=True, help="Crop to content")
-@click.option("--border", type=int, default=0, help="Border padding in pixels (PNG)")
 @click.option("--overwrite", is_flag=True, help="Overwrite existing file")
 @handle_error
 def export_render(output_path, fmt, page_index, scale, width, height,
-                  transparent, crop, border, overwrite):
+                  transparent, crop, overwrite):
     """Export the diagram to a file."""
     session = get_session()
     result = export_mod.render_or_save(
@@ -533,7 +532,7 @@ def export_render(output_path, fmt, page_index, scale, width, height,
         page_index=page_index, scale=scale,
         width=width, height=height,
         transparent=transparent, crop=crop,
-        border=border, overwrite=overwrite,
+        overwrite=overwrite,
     )
     output(result, f"Exported to: {result.get('output', result.get('drawio_file', ''))}")
 

@@ -1236,7 +1236,7 @@
       "category": "knowledge-management",
       "requires": "SiYuan running with HTTP API enabled (default http://127.0.0.1:6806)",
       "homepage": "https://github.com/siyuan-note/siyuan",
-      "source_url": "https://github.com/HKUDS/CLI-Anything",
+      "source_url": null,
       "install_strategy": "pip",
       "install_cmd": "pip install git+https://github.com/HKUDS/CLI-Anything.git#subdirectory=siyuan/agent-harness",
       "skill_md": "skills/cli-anything-siyuan/SKILL.md",
