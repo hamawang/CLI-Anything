@@ -100,6 +100,7 @@
 !/3MF/
 !/calibre/
 !/rekordbox/
+!/siyuan/
 # Step 5: Inside each software dir, ignore everything (including dotfiles)
 /gimp/*
 /gimp/.*
@@ -207,6 +208,8 @@
 /calibre/.*
 /rekordbox/*
 /rekordbox/.*
+/siyuan/*
+/siyuan/.*
 
 # Step 6: ...except agent-harness/
 !/gimp/agent-harness/
@@ -272,6 +275,7 @@
 !/quietshrink/agent-harness/
 !/mailchimp/agent-harness/
 !/rekordbox/agent-harness/
+!/siyuan/agent-harness/
 
 # Exclude non-gedit demo macros from macrocli (local only)
 /macrocli/agent-harness/cli_anything/macrocli/macro_definitions/demo/flameshot*
