@@ -100,6 +100,7 @@
 !/3MF/
 !/calibre/
 !/rekordbox/
+!/live2d/
 !/tigris/
 !/cc-switch/
 !/siyuan/
@@ -210,6 +211,8 @@
 /calibre/.*
 /rekordbox/*
 /rekordbox/.*
+/live2d/*
+/live2d/.*
 /tigris/*
 /tigris/.*
 /cc-switch/*
@@ -280,6 +283,7 @@
 !/sbox/agent-harness/
 !/quietshrink/agent-harness/
 !/mailchimp/agent-harness/
+!/live2d/agent-harness/
 !/rekordbox/agent-harness/
 !/tigris/agent-harness/
 !/cc-switch/agent-harness/
